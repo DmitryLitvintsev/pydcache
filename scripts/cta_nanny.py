@@ -57,7 +57,7 @@ def safe_json_deserializer(v):
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         return None  # Or log the error
 
-    
+
 class Worker(Process):
     """Worker process to query CTA DB and process results."""
 
@@ -128,6 +128,8 @@ class Worker(Process):
         )
 
         if not rows:
+            with print_lock:
+                logger.error(f"Failed to find CTA location for {pnfsid}")
             return
 
         disk_instance_name = rows[0]["disk_instance_name"]
@@ -251,11 +253,11 @@ def main() -> None:
     for worker in workers:
         worker.start()
 
-
     consumer = KafkaConsumer(config["kafka"].get("topic", "ingest.logs.cta.taped"),
                              group_id=config["kafka"].get("group", "dcache-ctananny-prd"),  # Required to resume
                              bootstrap_servers=config["kafka"].get("bootstrap_servers", "lskafka.fnal.gov:9092"),
-                             auto_offset_reset='earliest',    # Fallback if no offset is found
+                             auto_offset_reset='latest',    # Fallback if no offset is found
+                             #auto_offset_reset='earliest',    # Fallback if no offset is found
                              enable_auto_commit=True,           # Automatically save progress
                              value_deserializer=lambda m:  safe_json_deserializer(m))
                              #value_deserializer=lambda m: json.loads(m.decode("utf-8")))
@@ -280,14 +282,17 @@ def main() -> None:
                 exception_message = payload.get("exceptionMessageValue")
                 if not exception_message:
                     continue
+                logger.info(f"Found exception {vo} {instance} {exception_message}")
                 if exception_message.find("duplicate key value violates unique constraint") != -1:
                     try:
                         tuple =  exception_message.split("=")[1].split("already")[0].strip()
-                        disk_instance, pnfsid = re.sub("[()]", "", tuple).split(",")
+                        disk_instance, pnfsid = [i.strip() for i in re.sub("[()]", "", tuple).split(",")]
+
                         if disk_instance == args.instance:
-                            logger.debug(f"Found {pnfsid} {disk_instance}, putting on the queue")
+                            logger.info(f"Found {pnfsid} {disk_instance}, putting on the queue")
                             queue.put(pnfsid)
-                    except:
+                    except Exception as e:
+                        logger.info(f"Caught exception {e}")
                         pass
     except KeyboardInterrupt:
         logger.info("Interrupted successfully.")
