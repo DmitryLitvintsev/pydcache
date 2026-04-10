@@ -6,6 +6,8 @@ import socket
 import sys
 import time
 import uuid
+
+from multiprocessing import Process, Lock
 from typing import Any, Dict, List, Optional, Tuple, NoReturn
 
 from pydcache.util.ostools import execute_command

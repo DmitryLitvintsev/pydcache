@@ -51,7 +51,13 @@ HOSTNAME = socket.getfqdn()
 _VO = "vo"
 _INSTANCE = "instance"
 
+def safe_json_deserializer(v):
+    try:
+        return json.loads(v.decode('utf-8')) if v else None
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return None  # Or log the error
 
+    
 class Worker(Process):
     """Worker process to query CTA DB and process results."""
 
@@ -250,12 +256,22 @@ def main() -> None:
                              group_id=config["kafka"].get("group", "dcache-ctananny-prd"),  # Required to resume
                              bootstrap_servers=config["kafka"].get("bootstrap_servers", "lskafka.fnal.gov:9092"),
                              auto_offset_reset='earliest',    # Fallback if no offset is found
-                             enable_auto_commit=True,          # Automatically save progress
-                             value_deserializer=lambda m: json.loads(m.decode("utf-8")))
+                             enable_auto_commit=True,           # Automatically save progress
+                             value_deserializer=lambda m:  safe_json_deserializer(m))
+                             #value_deserializer=lambda m: json.loads(m.decode("utf-8")))
 
     try:
         for msg in consumer:
+            # Skip invalid bytes entirely
+            #message = msg.value.decode('utf-8', errors='ignore')
+            #print(message.keys())
+
+            # Replace invalid bytes with a placeholder ()
+            #decoded_value = message.value.decode('utf-8', errors='replace')
             message = msg.value
+            if not message:
+                print(f"WHAT {msg}")
+                continue
             message_string =  message["message"]
             payload = message["cta"]
             if _VO in payload and _INSTANCE in payload:
