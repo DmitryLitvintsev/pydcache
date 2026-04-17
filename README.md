@@ -10,7 +10,7 @@ Long-running “nanny” that consumes CTA taped/ingest logs from Kafka, detects
 ```mermaid
 flowchart TD
   A([Start]) --> B[Parse CLI args<br/>--cpu-count, --instance, --verbose]
-  B --> C[Load config from dcache.yaml<br/>]
+  B --> C[Load config from dcache.yaml]
   C --> D{Config file perms OK?<br/>st_mode == 33152}
   D -- No --> E[Log error<br/>Exit 1]
   D -- Yes --> F[Start Kerberos KinitWorker]
