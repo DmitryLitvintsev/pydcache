@@ -23,6 +23,7 @@ KRB5CCNAME = f"/tmp/krb5cc_root.migration-{UUID_STR}"
 # Environment setup
 os.environ["KRB5CCNAME"] = KRB5CCNAME
 
+
 def kinit() -> None:
     """Create Kerberos ticket for admin shell access."""
     cmd = f"/usr/bin/kinit -k host/{HOSTNAME}"
@@ -45,3 +46,9 @@ class KinitWorker(Process):
             with self.kinit_lock:
                 kinit()
                 time.sleep(14400)  # 4 hours
+
+    def stop(self) -> None:
+        self.stop = True
+        self.terminate()
+        self.join(timeout=1)
+        os.unlink(KRB5CCNAME)
