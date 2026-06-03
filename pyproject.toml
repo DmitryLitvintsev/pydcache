@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydcache"
-version = "0.1.2"
+version = "0.1.4"
 description = "Collection of dCache Python utilities"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -54,6 +54,7 @@ include = ["pydcache*"]
 
 [tool.setuptools.package-data]
 "pydcache" = ["py.typed"]
+"pydcache.config" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

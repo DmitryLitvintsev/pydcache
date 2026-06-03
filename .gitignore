@@ -54,3 +54,9 @@ cover/
 # OS
 .DS_Store
 Thumbs.db
+
+# Secret config files — never commit real credentials
+scripts/cta_nanny.yaml
+scripts/cta_nanny_cms.yaml
+scripts/*.yaml
+
