@@ -26,9 +26,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    "paramiko>=2.11",
-    "psycopg2-binary>=2.9",
-    "pyyaml>=6.0",
+    "paramiko>=2.7",
+    "psycopg2-binary>=2.8",
+    "pyyaml>=5.1",
 ]
 
 [project.optional-dependencies]
