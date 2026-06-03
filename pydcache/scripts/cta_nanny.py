@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, NoReturn
 from urllib.parse import urlparse
 
-import paramiko
 import psycopg2
 import psycopg2.extensions
 import psycopg2.extras
 import yaml
 
-from pydcache.util import admin, kerberos, ostools, paramiko, psycopg
+from pydcache.util import admin, kerberos, ostools, psycopg
+from pydcache.util import ssh
 from pydcache.config import get_config_path
 
 from kafka import KafkaConsumer
@@ -82,24 +82,23 @@ class Worker(Process):
 
     def run(self) -> None:
         """Process tasks from the queue."""
-        cta_db = chimera_db = ssh = None
+        cta_db = chimera_db = ssh_conn = None
         try:
             cta_db = psycopg.create_connection(self.config["cta_db"])
             chimera_db = psycopg.create_connection(self.config["chimera_db"])
-            ssh = paramiko.get_shell(
+            ssh_conn = ssh.get_shell(
                 self.config["admin"].get("host", SSH_HOST),
                 self.config["admin"].get("port", SSH_PORT),
                 self.config["admin"].get("user", SSH_USER)
             )
 
             for pnfsid in iter(self.queue.get, None):
-                self._process_file(ssh, cta_db, chimera_db, pnfsid)
+                self._process_file(ssh_conn, cta_db, chimera_db, pnfsid)
         except Exception as exc:
             error_string = traceback.format_exc()
-            #logger.error("Worker failed: %s", exc)
             logger.error(f"Worker failed: {error_string}")
         finally:
-            for conn in (ssh, cta_db, chimera_db):
+            for conn in (ssh_conn, cta_db, chimera_db):
                 if conn:
                     try:
                         conn.close()

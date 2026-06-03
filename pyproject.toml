@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydcache"
-version = "0.1.6"
+version = "0.1.7"
 description = "Collection of dCache Python utilities"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -26,6 +26,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
+    "kafka-python>=2.3.1",
     "paramiko>=2.7",
     "psycopg2-binary>=2.8",
     "pyyaml>=5.1",
