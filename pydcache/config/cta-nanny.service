@@ -1,0 +1,32 @@
+[Unit]
+Description=CTA Nanny – dCache/CTA duplicate-key repair daemon
+Documentation=https://github.com/DmitryLitvintsev/pydcache
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Path to your filled-in config (copy from /etc/pydcache/pydcache.yaml and edit)
+Environment="DCACHE_CONFIG=/etc/pydcache/pydcache.yaml"
+
+# Adjust --cpu-count and --instance to match your site
+ExecStart=CTA_NANNY_EXEC --cpu-count 10 --instance public_prd
+
+# Restart policy
+Restart=on-failure
+RestartSec=30s
+
+# Resource limits
+LimitNOFILE=65536
+
+# Send stdout/stderr to the journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cta-nanny
+
+[Install]
+WantedBy=multi-user.target
+

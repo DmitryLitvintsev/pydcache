@@ -1,6 +1,6 @@
 include LICENSE
 include README.md
 recursive-include docs *.svg
-recursive-include pydcache *.py py.typed *.yaml
+recursive-include pydcache *.py py.typed *.yaml *.service
 
 

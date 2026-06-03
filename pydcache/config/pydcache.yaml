@@ -1,0 +1,29 @@
+# cta_nanny configuration example
+#
+# Copy this file to a secure location, fill in your real values,
+# and point cta-nanny at it via the DCACHE_CONFIG environment variable:
+#
+#   export DCACHE_CONFIG=/path/to/cta_nanny.yaml
+#
+# WARNING: this file contains credentials — do NOT commit it to version control.
+
+# PostgreSQL connection URIs (require read/write access)
+# Format: postgresql://<user>:<password>@<host>:<port>/<database>
+cta_db: "postgresql://cta_user:changeme@cta-db.example.com:5432/cta_prd"
+chimera_db: "postgresql://chimera_user:changeme@chimera-db.example.com:5432/chimera"
+
+# dCache admin SSH shell
+admin:
+  host: dcache-admin.example.com
+  port: 22224
+  user: dcache_admin_user
+
+# Kafka consumer
+kafka:
+  # Topic produced by cta-taped ingest logs
+  topic: "ingest.logs.cta.taped"
+  # topic: "ingest.dcache.billing"
+  group: "dcache-ctananny-consumer-group"
+  # group: "dcache-public-stores"
+  bootstrap_servers: "kafka-broker.example.com:9092"
+
