@@ -21,7 +21,7 @@ import psycopg2.extras
 import yaml
 
 from pydcache.util import admin, kerberos, ostools, paramiko, psycopg
-
+from pydcache.config import get_config_path
 
 from kafka import KafkaConsumer
 
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 print_lock = Lock()
 kinit_lock = Lock()
 
-CONFIG_FILE = os.getenv("DCACHE_CONFIG", "dcache.yaml")
+CONFIG_FILE = os.getenv("DCACHE_CONFIG")   # None → auto-resolved via get_config_path()
 SSH_HOST = "fndca"
 SSH_PORT = 24223
 SSH_USER = "enstore"
@@ -221,23 +221,22 @@ def main() -> None:
 
     # Load configuration
     try:
-        config_path = Path(CONFIG_FILE)
-        #if config_path.stat().st_mode != 0o600:
-        if config_path.stat().st_mode != 33152 :
+        config_path = get_config_path()
+        if config_path.stat().st_mode != 33152:
             logger.error(
                 "Config file %s permissions too permissive, should be 0600",
-                CONFIG_FILE
+                config_path
             )
             sys.exit(1)
 
         config = yaml.safe_load(config_path.read_text())
         if not config:
-            logger.error("Failed to load configuration from %s", CONFIG_FILE)
+            logger.error("Failed to load configuration from %s", config_path)
             sys.exit(1)
 
     except (OSError, IOError) as exc:
         if isinstance(exc, FileNotFoundError):
-            logger.error("Config file %s does not exist", CONFIG_FILE)
+            logger.error("Config file %s does not exist", exc)
         else:
             logger.error("Error reading config file: %s", exc)
         sys.exit(1)
