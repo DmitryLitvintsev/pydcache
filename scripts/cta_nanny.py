@@ -8,6 +8,7 @@ import re
 import socket
 import sys
 import time
+import traceback
 from multiprocessing import Lock, Process, Queue
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, NoReturn
@@ -94,7 +95,9 @@ class Worker(Process):
             for pnfsid in iter(self.queue.get, None):
                 self._process_file(ssh, cta_db, chimera_db, pnfsid)
         except Exception as exc:
-            logger.error("Worker failed: %s", exc)
+            error_string = traceback.format_exc()
+            #logger.error("Worker failed: %s", exc)
+            logger.error(f"Worker failed: {error_string}")
         finally:
             for conn in (ssh, cta_db, chimera_db):
                 if conn:
@@ -126,7 +129,7 @@ class Worker(Process):
             "sc.storage_class_name, "
             "'cta://cta/'||af.disk_file_id||'?archiveid='||af.archive_file_id as location "
             "from archive_file af inner join storage_class sc on sc.storage_class_id = af.storage_class_id "
-            "where af.disk_file_id = %s and af.creation_time < %",
+            "where af.disk_file_id = %s and af.creation_time < %s",
             (pnfsid, int(time.time()) - 6 * 3600)
         )
 
@@ -155,9 +158,7 @@ class Worker(Process):
         if result[0]["count"] != 0:
             with print_lock:
                 logger.error(
-                    "File has location in chimera %s %s, Skipping",
-                    pnfsid,
-                    storage_class
+                    f"File has location in chimera {pnfsid} {storage_class}, Skipping"
                     )
             return
 
