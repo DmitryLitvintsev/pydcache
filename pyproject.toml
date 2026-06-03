@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydcache"
-version = "0.1.1"
+version = "0.1.2"
 description = "Collection of dCache Python utilities"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -42,7 +42,7 @@ dev = [
 ]
 
 [project.scripts]
-cta-nanny = "scripts.cta_nanny:main"
+cta-nanny = "pydcache.scripts.cta_nanny:main"
 
 [project.urls]
 Homepage = "https://github.com/DmitryLitvintsev/pydcache"
@@ -50,7 +50,7 @@ Issues = "https://github.com/DmitryLitvintsev/pydcache/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["pydcache*", "scripts*"]
+include = ["pydcache*"]
 
 [tool.setuptools.package-data]
 "pydcache" = ["py.typed"]
