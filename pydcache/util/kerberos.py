@@ -31,24 +31,25 @@ def kinit() -> None:
         logger.error(f"Failed to initialize Kerberos ticket {cmd}")
         sys.exit(1)
 
+
 class KinitWorker(Process):
     """Worker process to maintain Kerberos tickets."""
 
     def __init__(self) -> None:
         """Initialize the worker."""
         super().__init__()
-        self.stop = False
+        self._stop = False
         self.kinit_lock = Lock()
 
     def run(self) -> None:
         """Periodically refresh Kerberos tickets."""
-        while not self.stop:
+        while not self._stop:
             with self.kinit_lock:
                 kinit()
                 time.sleep(14400)  # 4 hours
 
     def stop(self) -> None:
-        self.stop = True
+        self._stop = True
         self.terminate()
         self.join(timeout=1)
         os.unlink(KRB5CCNAME)
