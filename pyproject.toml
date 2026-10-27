@@ -30,6 +30,7 @@ dependencies = [
     "paramiko>=2.7",
     "psycopg2-binary>=2.8",
     "pyyaml>=5.1",
+    "requests>=2.32",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +46,7 @@ dev = [
 [project.scripts]
 cta-nanny = "pydcache.scripts.cta_nanny:main"
 dcache-kill-restores = "pydcache.scripts.dcache_kill_restores:main"
+dcache-tape-api = "pydcache.scripts.dcache_kill_restores:main"
 
 [project.urls]
 Homepage = "https://github.com/DmitryLitvintsev/pydcache"
