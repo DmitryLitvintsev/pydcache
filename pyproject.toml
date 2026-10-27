@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydcache"
-version = "0.1.9"
+version = "0.1.10"
 description = "Collection of dCache Python utilities"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -47,6 +47,7 @@ dev = [
 cta-nanny = "pydcache.scripts.cta_nanny:main"
 dcache-kill-restores = "pydcache.scripts.dcache_kill_restores:main"
 dcache-tape-api = "pydcache.scripts.dcache_kill_restores:main"
+dcache-ferry = "pydcache.script.dcache_ferry:main"
 
 [project.urls]
 Homepage = "https://github.com/DmitryLitvintsev/pydcache"
