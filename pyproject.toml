@@ -47,7 +47,7 @@ dev = [
 cta-nanny = "pydcache.scripts.cta_nanny:main"
 dcache-kill-restores = "pydcache.scripts.dcache_kill_restores:main"
 dcache-tape-api = "pydcache.scripts.dcache_kill_restores:main"
-dcache-ferry = "pydcache.script.dcache_ferry:main"
+dcache-ferry = "pydcache.scripts.dcache_ferry:main"
 
 [project.urls]
 Homepage = "https://github.com/DmitryLitvintsev/pydcache"
