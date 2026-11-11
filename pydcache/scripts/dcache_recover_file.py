@@ -363,32 +363,28 @@ def main() -> None:
     # Load configuration
     config = {}
     try:
-        config_path = Path(CONFIG_FILE)
-        #if config_path.stat().st_mode != 0o600:
-        if config_path.stat().st_mode != 33152 :
+        config_path = get_config_path()
+        if config_path.stat().st_mode != 33152:
             logger.error(
                 "Config file %s permissions too permissive, should be 0600",
-                CONFIG_FILE
+                config_path
             )
             sys.exit(1)
 
         config = yaml.safe_load(config_path.read_text())
         if not config:
-            logger.error("Failed to load configuration from %s", CONFIG_FILE)
+            logger.error("Failed to load configuration from %s", config_path)
             sys.exit(1)
 
     except (OSError, IOError) as exc:
         if isinstance(exc, FileNotFoundError):
-            logger.error("Config file %s does not exist", CONFIG_FILE)
+            logger.error("Config file %s does not exist", exc)
         else:
             logger.error("Error reading config file: %s", exc)
         sys.exit(1)
     except yaml.YAMLError as exc:
         logger.error("Error parsing config file: %s", exc)
         sys.exit(1)
-
-
-
 
     logger.info("Starting recovery processing")
 
