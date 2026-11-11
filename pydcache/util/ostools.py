@@ -49,3 +49,21 @@ def get_path(pnfsid: str) -> Optional[str]:
     except (IOError, OSError) as exc:
         logger.error("Failed to get path for %s: %s", pnfsid, exc)
         return None
+
+
+def get_pnfsid(path: str) -> str:
+    """
+    Get pnfsid for path
+
+    Args:
+        cmd: Command to execute.
+
+    Returns:
+        The command's return code.
+    """
+    pnfsid = None
+    dn = os.path.dirname(path)
+    fn = os.path.basename(path)
+    with open("%s/.(id)(%s)" % (dn, fn,), "r") as fh:
+        pnfsid = fh.readlines()[0].strip()
+    return pnfsid
