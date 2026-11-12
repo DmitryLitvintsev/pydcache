@@ -182,33 +182,35 @@ class Worker(Process):
 
                 inserted_archive = True
 
-
-            res = psycopg.insert(
-                cta_db,
-                "insert into tape_file( "
-                "  vid, "
-                "  fseq, "
-                "  block_id, "
-                "  logical_size_in_bytes, "
-                "  copy_nb, "
-                "  creation_time, "
-                "  archive_file_id "
-                "  ) values ( "
-                "%s, "
-                "%s, "
-                "%s, "
-                "%s, "
-                "%s, "
-                "%s, "
-                "%s ) ",
-                (file_info.get("vid"),
-                 file_info.get("fseq"),
-                 file_info.get("block_id"),
-                 file_info.get("size_in_bytes"),
-                 file_info.get("copy_nb"),
-                 file_info.get("tape_file_creation_time"),
-                 file_info.get("archive_file_id")))
-
+                try:
+                    res = psycopg.insert(
+                        cta_db,
+                        "insert into tape_file( "
+                        "  vid, "
+                        "  fseq, "
+                        "  block_id, "
+                        "  logical_size_in_bytes, "
+                        "  copy_nb, "
+                        "  creation_time, "
+                        "  archive_file_id "
+                        "  ) values ( "
+                        "%s, "
+                        "%s, "
+                        "%s, "
+                        "%s, "
+                        "%s, "
+                        "%s, "
+                        "%s ) ",
+                        (file_info.get("vid"),
+                         file_info.get("fseq"),
+                         file_info.get("block_id"),
+                         file_info.get("size_in_bytes"),
+                         file_info.get("copy_nb"),
+                         file_info.get("tape_file_creation_time"),
+                         file_info.get("archive_file_id")))
+                    except psycopg2.IntegrityError:
+                        logger.warning(f"Tape file record aleady exists {archive_file_id} {pnfsid} {file_name}")
+                        pass
 
             res = psycopg.insert(
                 cta_db,
