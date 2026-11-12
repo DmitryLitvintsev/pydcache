@@ -128,7 +128,6 @@ class Worker(Process):
         inserted_archive = False
 
         for file_info in rows:
-            file_info = rows[0]
             adler32_csum = hex(int(file_info.get("checksum_adler32"))).lstrip("0x").zfill(8)
             storage_class = file_info.get("storage_class_name")
             parts =  storage_class.split("@")
