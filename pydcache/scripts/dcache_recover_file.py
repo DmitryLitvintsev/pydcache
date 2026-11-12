@@ -403,8 +403,9 @@ def main() -> None:
         files = set(args.path)
 
     if args.file:
-        with open(args.file, "r") as f:
-            files.add(line.strip())
+        for line in f:
+            with open(args.file, "r") as f:
+                files.add(line.strip())
 
 
     logger.info(f"Collected {len(files)} files for processing")
