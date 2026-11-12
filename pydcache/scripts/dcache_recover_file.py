@@ -99,6 +99,14 @@ class Worker(Process):
             storage_class: Storage class
         """
 
+        dir_name  = os.path.dirname(file_name)
+        if not dir_name.exists():
+            logger.warning(f"Parent directory does not exist, skipping {file_name}")
+            return
+
+        Path(file_name).touch()
+        new_pnfsid = ostools.get_pnfsid(file_name)
+
         rows = psycopg.select(
             chimera_db,
             "select * "
@@ -208,8 +216,6 @@ class Worker(Process):
                 (file_info.get("vid"),))
 
 
-        Path(file_name).touch()
-        new_pnfsid = ostools.get_pnfsid(file_name)
 
         res = psycopg.update(
             chimera_db,
