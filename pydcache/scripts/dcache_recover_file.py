@@ -100,7 +100,7 @@ class Worker(Process):
         """
 
         dir_name  = os.path.dirname(file_name)
-        if not dir_name.exists():
+        if not os.path.exists(dir_name):
             logger.warning(f"Parent directory does not exist, skipping {file_name}")
             return
 
