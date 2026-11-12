@@ -208,9 +208,9 @@ class Worker(Process):
                          file_info.get("copy_nb"),
                          file_info.get("tape_file_creation_time"),
                          file_info.get("archive_file_id")))
-                    except psycopg2.IntegrityError:
-                        logger.warning(f"Tape file record aleady exists {archive_file_id} {pnfsid} {file_name}")
-                        pass
+                except psycopg2.IntegrityError:
+                    logger.warning(f"Tape file record aleady exists {archive_file_id} {pnfsid} {file_name}")
+                    pass
 
             res = psycopg.insert(
                 cta_db,
