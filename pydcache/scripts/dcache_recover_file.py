@@ -104,6 +104,10 @@ class Worker(Process):
             logger.warning(f"Parent directory does not exist, skipping {file_name}")
             return
 
+        if os.path.exists(file_name):
+            logger.error(f"File exists, skipping {file_name}")
+            return
+
         Path(file_name).touch()
         new_pnfsid = ostools.get_pnfsid(file_name)
 
