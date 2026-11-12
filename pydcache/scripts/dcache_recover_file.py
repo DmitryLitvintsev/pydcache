@@ -126,14 +126,13 @@ class Worker(Process):
             return
 
         inserted_archive = False
+        adler32_csum = hex(int(rows[0].get("checksum_adler32"))).lstrip("0x").zfill(8)
+        storage_class = rows[0].get("storage_class_name")
+        parts =  storage_class.split("@")
+        (vo, file_family), hsm = parts[0].split("."),parts[1]
+        archive_file_id = rows[0].get("archive_file_id")
 
         for file_info in rows:
-            adler32_csum = hex(int(file_info.get("checksum_adler32"))).lstrip("0x").zfill(8)
-            storage_class = file_info.get("storage_class_name")
-            parts =  storage_class.split("@")
-            (vo, file_family), hsm = parts[0].split("."),parts[1]
-            archive_file_id = file_info.get("archive_file_id")
-
             if not inserted_archive:
                 res = psycopg.insert(
                     cta_db,
@@ -176,37 +175,37 @@ class Worker(Process):
                 inserted_archive = True
 
 
-                res = psycopg.insert(
-                    cta_db,
-                    "insert into tape_file( "
-                    "  vid, "
-                    "  fseq, "
-                    "  block_id, "
-                    "  logical_size_in_bytes, "
-                    "  copy_nb, "
-                    "  creation_time, "
-                    "  archive_file_id "
-                    "  ) values ( "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s ) ",
-                    (file_info.get("vid"),
-                     file_info.get("fseq"),
-                     file_info.get("block_id"),
-                     file_info.get("size_in_bytes"),
-                     file_info.get("copy_nb"),
-                     file_info.get("tape_file_creation_time"),
-                     file_info.get("archive_file_id")))
+            res = psycopg.insert(
+                cta_db,
+                "insert into tape_file( "
+                "  vid, "
+                "  fseq, "
+                "  block_id, "
+                "  logical_size_in_bytes, "
+                "  copy_nb, "
+                "  creation_time, "
+                "  archive_file_id "
+                "  ) values ( "
+                "%s, "
+                "%s, "
+                "%s, "
+                "%s, "
+                "%s, "
+                "%s, "
+                "%s ) ",
+                (file_info.get("vid"),
+                 file_info.get("fseq"),
+                 file_info.get("block_id"),
+                 file_info.get("size_in_bytes"),
+                 file_info.get("copy_nb"),
+                 file_info.get("tape_file_creation_time"),
+                 file_info.get("archive_file_id")))
 
 
-                res = psycopg.insert(
-                    cta_db,
-                    "update tape set dirty = '1' where vid = %s",
-                    (file_info.get("vid"),))
+            res = psycopg.insert(
+                cta_db,
+                "update tape set dirty = '1' where vid = %s",
+                (file_info.get("vid"),))
 
 
         Path(file_name).touch()
@@ -313,9 +312,17 @@ class Worker(Process):
             "delete from file_recycle_log "
             "where "
             " archive_file_id = %s "
-            " and copy_nb = %s "
             " and disk_file_id_when_deleted = %s ",
-            (archive_file_id, file_info.get("copy_nb"), pnfsid))
+            (archive_file_id, pnfsid))
+
+#        res = psycopg.insert(
+#            cta_db,
+#            "delete from file_recycle_log "
+#            "where "
+#            " archive_file_id = %s "
+#            " and copy_nb = %s "
+#            " and disk_file_id_when_deleted = %s ",
+#            (archive_file_id, file_info.get("copy_nb"), pnfsid))
 
 
 def main() -> None:
