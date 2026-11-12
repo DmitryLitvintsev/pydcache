@@ -125,84 +125,89 @@ class Worker(Process):
             logger.error(f"{file_name} {pnfsid} does not exist in cta DB, skipping")
             return
 
-        file_info = rows[0]
-        adler32_csum = hex(int(file_info.get("checksum_adler32"))).lstrip("0x").zfill(8)
-        storage_class = file_info.get("storage_class_name")
-        parts =  storage_class.split("@")
-        (vo, file_family), hsm = parts[0].split("."),parts[1]
-        archive_file_id = file_info.get("archive_file_id")
+        inserted_archive = False
+
+        for file_info in rows:
+            file_info = rows[0]
+            adler32_csum = hex(int(file_info.get("checksum_adler32"))).lstrip("0x").zfill(8)
+            storage_class = file_info.get("storage_class_name")
+            parts =  storage_class.split("@")
+            (vo, file_family), hsm = parts[0].split("."),parts[1]
+            archive_file_id = file_info.get("archive_file_id")
+
+            if not inserted_archive:
+                res = psycopg.insert(
+                    cta_db,
+                    "insert into archive_file ( "
+                    "  archive_file_id, "
+                    "  disk_instance_name, "
+                    "  disk_file_id, "
+                    "  disk_file_uid, "
+                    "  disk_file_gid, "
+                    "  size_in_bytes, "
+                    "  checksum_blob, "
+                    "  checksum_adler32, "
+                    "  storage_class_id, "
+                    "  creation_time, "
+                    "  reconciliation_time "
+                    " ) values ( "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s) ",
+                    (file_info.get("archive_file_id"),
+                     file_info.get("disk_instance_name"),
+                     file_info.get("disk_file_id_when_deleted"),
+                     file_info.get("disk_file_uid"),
+                     file_info.get("disk_file_gid"),
+                     file_info.get("size_in_bytes"),
+                     file_info.get("checksum_blob"),
+                     file_info.get("checksum_adler32"),
+                     file_info.get("storage_class_id"),
+                     file_info.get("archive_file_creation_time"),
+                     file_info.get("reconciliation_time")))
+
+                inserted_archive = True
 
 
-        res = psycopg.insert(
-            cta_db,
-            "insert into archive_file ( "
-            "  archive_file_id, "
-            "  disk_instance_name, "
-            "  disk_file_id, "
-            "  disk_file_uid, "
-            "  disk_file_gid, "
-            "  size_in_bytes, "
-            "  checksum_blob, "
-            "  checksum_adler32, "
-            "  storage_class_id, "
-            "  creation_time, "
-            "  reconciliation_time "
-            " ) values ( "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s) ",
-            (file_info.get("archive_file_id"),
-             file_info.get("disk_instance_name"),
-             file_info.get("disk_file_id_when_deleted"),
-             file_info.get("disk_file_uid"),
-             file_info.get("disk_file_gid"),
-             file_info.get("size_in_bytes"),
-             file_info.get("checksum_blob"),
-             file_info.get("checksum_adler32"),
-             file_info.get("storage_class_id"),
-             file_info.get("archive_file_creation_time"),
-             file_info.get("reconciliation_time")))
+                res = psycopg.insert(
+                    cta_db,
+                    "insert into tape_file( "
+                    "  vid, "
+                    "  fseq, "
+                    "  block_id, "
+                    "  logical_size_in_bytes, "
+                    "  copy_nb, "
+                    "  creation_time, "
+                    "  archive_file_id "
+                    "  ) values ( "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s, "
+                    "%s ) ",
+                    (file_info.get("vid"),
+                     file_info.get("fseq"),
+                     file_info.get("block_id"),
+                     file_info.get("size_in_bytes"),
+                     file_info.get("copy_nb"),
+                     file_info.get("tape_file_creation_time"),
+                     file_info.get("archive_file_id")))
 
 
-        res = psycopg.insert(
-            cta_db,
-            "insert into tape_file( "
-            "  vid, "
-            "  fseq, "
-            "  block_id, "
-            "  logical_size_in_bytes, "
-            "  copy_nb, "
-            "  creation_time, "
-            "  archive_file_id "
-            "  ) values ( "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s, "
-            "%s ) ",
-            (file_info.get("vid"),
-             file_info.get("fseq"),
-             file_info.get("block_id"),
-             file_info.get("size_in_bytes"),
-             file_info.get("copy_nb"),
-             file_info.get("tape_file_creation_time"),
-             file_info.get("archive_file_id")))
-
-
-        res = psycopg.insert(
-            cta_db,
-            "update tape set dirty = '1' where vid = %s",
-            (file_info.get("vid"),))
+                res = psycopg.insert(
+                    cta_db,
+                    "update tape set dirty = '1' where vid = %s",
+                    (file_info.get("vid"),))
 
 
         Path(file_name).touch()
