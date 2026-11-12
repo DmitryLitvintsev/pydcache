@@ -405,7 +405,7 @@ def main() -> None:
     if args.file:
         with open(args.file, "r") as f:
             for line in f:
-                file_path = line.strip())
+                file_path = line.strip()
                 if not file_path:
                     continue
                 files.add(file_path)
