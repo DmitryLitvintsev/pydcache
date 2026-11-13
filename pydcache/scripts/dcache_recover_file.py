@@ -8,20 +8,14 @@ Script to recover deleted file.
 from __future__ import annotations
 
 import argparse
-import errno
 import logging
 import multiprocessing
 import os
-import re
-import socket
-import subprocess
 import sys
-import time
-import uuid
-from multiprocessing import Lock, Process, Queue
+import traceback
+from multiprocessing import Process, Queue
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, NoReturn
-from urllib.parse import urlparse
+from typing import Any, Dict
 
 import psycopg2
 import psycopg2.extensions
@@ -39,11 +33,248 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global locks
-print_lock = Lock()
 
-# Constants
-CONFIG_FILE = os.getenv("DCACHE_CONFIG")   # None → auto-resolved via get_config_path()
+def insert_archive_file(
+    cta_db: psycopg2.extensions.connection,
+    file_info: Dict[str, Any]
+) -> None:
+    """Insert archive file record based on file_recycle_log record
+
+    Args:
+        cta_db: CTA database connection
+        file_info: dictionary containing file record in file_recycle_log
+    """
+    psycopg.insert(
+        cta_db,
+        "insert into archive_file ( "
+        "  archive_file_id, "
+        "  disk_instance_name, "
+        "  disk_file_id, "
+        "  disk_file_uid, "
+        "  disk_file_gid, "
+        "  size_in_bytes, "
+        "  checksum_blob, "
+        "  checksum_adler32, "
+        "  storage_class_id, "
+        "  creation_time, "
+        "  reconciliation_time "
+        " ) values ( "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s) ",
+        (file_info.get("archive_file_id"),
+         file_info.get("disk_instance_name"),
+         file_info.get("disk_file_id_when_deleted"),
+         file_info.get("disk_file_uid"),
+         file_info.get("disk_file_gid"),
+         file_info.get("size_in_bytes"),
+         file_info.get("checksum_blob"),
+         file_info.get("checksum_adler32"),
+         file_info.get("storage_class_id"),
+         file_info.get("archive_file_creation_time"),
+         file_info.get("reconciliation_time")))
+
+
+def insert_tape_file(
+    cta_db: psycopg2.extensions.connection,
+    file_info: Dict[str, Any]
+) -> None:
+    """Insert tape file record based on file_recycle_log record
+
+    Args:
+        cta_db: CTA database connection
+        file_info: dictionary containing file record in file_recycle_log
+    """
+
+    psycopg.insert(
+        cta_db,
+        "insert into tape_file( "
+        "  vid, "
+        "  fseq, "
+        "  block_id, "
+        "  logical_size_in_bytes, "
+        "  copy_nb, "
+        "  creation_time, "
+        "  archive_file_id "
+        "  ) values ( "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s, "
+        "%s ) ",
+        (file_info.get("vid"),
+         file_info.get("fseq"),
+         file_info.get("block_id"),
+         file_info.get("size_in_bytes"),
+         file_info.get("copy_nb"),
+         file_info.get("tape_file_creation_time"),
+         file_info.get("archive_file_id")))
+
+
+def update_inode(
+    chimera_db: psycopg2.extensions.connection,
+    chimera_file_info: Dict[str, Any],
+    pnfsid: str
+) -> None:
+    """Replace temporary file inode info with deleted file info
+
+    Args:
+        chimera_db: Chimera database connection
+        chimera_file_info: dictionary containing original file info
+        pnfsid: pnfsid of temporary file
+    """
+    psycopg.update(
+        chimera_db,
+        "update t_inodes set "
+        " ipnfsid = %s, "
+        " imode = %s, "
+        " iuid = %s, "
+        " igid = %s, "
+        " icrtime = %s, "
+        " ictime = %s, "
+        " iatime = %s, "
+        " imtime = %s, "
+        " iaccess_latency = %s, "
+        " iretention_policy = 0, "
+        " isize = %s "
+        "where ipnfsid = %s",
+        (chimera_file_info.get("ipnfsid"),
+         chimera_file_info.get("imode"),
+         chimera_file_info.get("iuid"),
+         chimera_file_info.get("igid"),
+         chimera_file_info.get("icrtime"),
+         chimera_file_info.get("icrtime"),
+         chimera_file_info.get("icrtime"),
+         chimera_file_info.get("icrtime"),
+         chimera_file_info.get("iaccess_latency"),
+         chimera_file_info.get("isize"),
+         pnfsid,))
+
+
+def update_inode_checksum(
+    chimera_db: psycopg2.extensions.connection,
+    adler32_csum: str,
+    pnfsid: str
+) -> None:
+    """Set inode adler32 checksum, replacing an existing one
+
+    Args:
+        chimera_db: Chimera database connection
+        adler32_csum: adler32 checksum
+        pnfsid: pnfsid of deleted file
+    """
+    # itype 1 is ADLER32; a file created by touch has no checksum row yet
+    psycopg.insert(
+        chimera_db,
+        "insert into t_inodes_checksum (inumber, itype, isum) "
+        "values ("
+        "(select inumber from t_inodes where ipnfsid = %s), 1, %s) "
+        "on conflict on constraint t_inodes_checksum_pkey "
+        "do update set isum = excluded.isum",
+        (pnfsid, adler32_csum))
+
+
+def update_locationinfo(
+    chimera_db: psycopg2.extensions.connection,
+    chimera_file_info: Dict[str, Any],
+    archive_file_id: int,
+    pnfsid_new: str
+) -> None:
+    """Update locationinfo w/ archive_file_id
+
+    Args:
+        chimera_db: Chimera database connection
+        chimera_file_info: dictionary containing original file info
+        archive_file_id: archive file id
+        pnfsid_new: placeholder file pnfsid
+    """
+
+    pnfsid = chimera_file_info.get("ipnfsid")
+
+    psycopg.insert(
+        chimera_db,
+        "insert into t_locationinfo ("
+        " inumber, itype, ipriority, ictime, iatime, istate, ilocation "
+        ") values ("
+        "(select inumber from t_inodes where ipnfsid = %s), "
+        "0, 10, %s, %s, 1, %s)",
+        (chimera_file_info.get("ipnfsid"),
+         chimera_file_info.get("icrtime"),
+         chimera_file_info.get("icrtime"),
+         f"cta://cta/{pnfsid}?archiveid={archive_file_id}"))
+
+    rows = psycopg.select(
+        chimera_db,
+        "select ilocation from t_locationinfo "
+        "where inumber = (select inumber from t_inodes where ipnfsid = %s) "
+        " and itype = 1",
+        (pnfsid,))
+
+    if rows:
+        locations = [row["ilocation"] for row in rows]
+        logger.info(f"TODO: delete {pnfsid_new} on locations {locations}")
+
+    psycopg.insert(
+        chimera_db,
+        "delete from t_locationinfo "
+        "where inumber = (select inumber from t_inodes where ipnfsid = %s) "
+        " and itype = 1",
+        (pnfsid,))
+
+    psycopg.insert(
+        chimera_db,
+        "delete from t_locationinfo "
+        "where inumber = (select inumber from t_inodes where ipnfsid = %s) "
+        "and ilocation like '%%*'",
+        (pnfsid,))
+
+
+def delete_from_deleted_paths(
+    chimera_db: psycopg2.extensions.connection,
+    pnfsid: str
+) -> None:
+    """Delete from deleted_paths
+
+    Args:
+        chimera_db: Chimera database connection
+        pnfsid: pnfsid of deleted file
+    """
+    psycopg.insert(
+        chimera_db,
+        "delete from t_deleted_paths "
+        "where ipnfsid = %s ",
+        (pnfsid,))
+
+
+def delete_from_file_recycle_log(
+    cta_db: psycopg2.extensions.connection,
+    archive_file_id: int,
+    pnfsid: str
+) -> None:
+    """Delete entry file_recycle_log
+
+    Args:
+       cta_db: CTA database connection
+       archive_file_id: archive file id
+       pnfsid: pnfsid of deleted file
+    """
+    psycopg.insert(
+        cta_db,
+        "delete from file_recycle_log "
+        "where "
+        " archive_file_id = %s "
+        " and disk_file_id_when_deleted = %s ",
+        (archive_file_id, pnfsid))
 
 
 class Worker(Process):
@@ -71,10 +302,19 @@ class Worker(Process):
             cta_db = psycopg.create_connection(self.config["cta_db"])
             chimera_db = psycopg.create_connection(self.config["chimera_db"])
             for file_name in iter(self.queue.get, None):
-                self._process_file(file_name, cta_db, chimera_db)
-
+                try:
+                    self._process_file(file_name, cta_db, chimera_db)
+                except Exception as e:
+                    logger.error(f"Error processing {file_name} {e}")
+                    error_trace = traceback.format_exc()
+                    logger.error(error_trace)
+                    # a failed statement leaves the transaction aborted
+                    for conn in (cta_db, chimera_db):
+                        conn.rollback()
         except Exception as exc:
-            logger.error("Worker failed: %s", exc)
+            logger.error(f"Worker failed: {exc}")
+            error_trace = traceback.format_exc()
+            logger.error(error_trace)
         finally:
             for conn in (cta_db, chimera_db):
                 if conn:
@@ -95,31 +335,30 @@ class Worker(Process):
             file_name: full file name
             cta_db: CTA database connection
             chimera_db: Chimera database connection
-            pnfsid: PNFS ID to process
-            storage_class: Storage class
         """
 
-        dir_name  = os.path.dirname(file_name)
+        dir_name = os.path.dirname(file_name)
         if not os.path.exists(dir_name):
-            logger.warning(f"Parent directory does not exist, skipping {file_name}")
+            logger.warning(
+                f"Parent directory does not exist, skipping {file_name}")
             return
 
         if os.path.exists(file_name):
             logger.error(f"File exists, skipping {file_name}")
             return
 
-        Path(file_name).touch()
-        new_pnfsid = ostools.get_pnfsid(file_name)
-
         rows = psycopg.select(
             chimera_db,
             "select * "
-            "from t_deleted_paths where iname = %s order by ideltime desc limit 1",
+            "from t_deleted_paths where iname = %s "
+            "order by ideltime desc limit 1",
             (file_name, )
         )
 
         if not rows:
-            logger.error(f"{file_name} does not exist in t_deletd_paths in cbimera, skipping")
+            logger.error(
+                f"{file_name} does not exist in t_deleted_paths in chimera, "
+                "skipping")
             return
 
         chimera_file_info = rows[0]
@@ -129,212 +368,84 @@ class Worker(Process):
             cta_db,
             "select sc.storage_class_name, frl.* "
             "from file_recycle_log frl inner join storage_class sc "
-            "on frl.storage_class_id = sc.storage_class_id  where disk_file_id_when_deleted = %s ",
+            "on frl.storage_class_id = sc.storage_class_id  "
+            "where disk_file_id_when_deleted = %s ",
             (pnfsid, )
         )
 
         if not rows:
-            logger.error(f"{file_name} {pnfsid} does not exist in cta DB, skipping")
+            logger.error(
+                f"{file_name} {pnfsid} does not exist in CTA DB, skipping")
             return
 
+        # placeholder file to be populated from deleted file metadata
+        Path(file_name).touch()
+        new_pnfsid = ostools.get_pnfsid(file_name)
+
         inserted_archive = False
-        adler32_csum = hex(int(rows[0].get("checksum_adler32"))).lstrip("0x").zfill(8)
+        adler32_csum = hex(
+            int(rows[0].get("checksum_adler32"))).lstrip("0x").zfill(8)
         storage_class = rows[0].get("storage_class_name")
-        parts =  storage_class.split("@")
-        (vo, file_family), hsm = parts[0].split("."),parts[1]
+        parts = storage_class.split("@")
+        (vo, file_family), hsm = parts[0].split("."), parts[1]
         archive_file_id = rows[0].get("archive_file_id")
 
         for file_info in rows:
             if not inserted_archive:
-                res = psycopg.insert(
-                    cta_db,
-                    "insert into archive_file ( "
-                    "  archive_file_id, "
-                    "  disk_instance_name, "
-                    "  disk_file_id, "
-                    "  disk_file_uid, "
-                    "  disk_file_gid, "
-                    "  size_in_bytes, "
-                    "  checksum_blob, "
-                    "  checksum_adler32, "
-                    "  storage_class_id, "
-                    "  creation_time, "
-                    "  reconciliation_time "
-                    " ) values ( "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s, "
-                    "%s) ",
-                    (file_info.get("archive_file_id"),
-                     file_info.get("disk_instance_name"),
-                     file_info.get("disk_file_id_when_deleted"),
-                     file_info.get("disk_file_uid"),
-                     file_info.get("disk_file_gid"),
-                     file_info.get("size_in_bytes"),
-                     file_info.get("checksum_blob"),
-                     file_info.get("checksum_adler32"),
-                     file_info.get("storage_class_id"),
-                     file_info.get("archive_file_creation_time"),
-                     file_info.get("reconciliation_time")))
-
+                insert_archive_file(cta_db, file_info)
                 inserted_archive = True
+            try:
+                insert_tape_file(cta_db, file_info)
+            except psycopg2.IntegrityError:
+                logger.warning(
+                    "Tape file record already exists "
+                    f"{archive_file_id} {pnfsid} {file_name}")
+                pass
 
-                try:
-                    res = psycopg.insert(
-                        cta_db,
-                        "insert into tape_file( "
-                        "  vid, "
-                        "  fseq, "
-                        "  block_id, "
-                        "  logical_size_in_bytes, "
-                        "  copy_nb, "
-                        "  creation_time, "
-                        "  archive_file_id "
-                        "  ) values ( "
-                        "%s, "
-                        "%s, "
-                        "%s, "
-                        "%s, "
-                        "%s, "
-                        "%s, "
-                        "%s ) ",
-                        (file_info.get("vid"),
-                         file_info.get("fseq"),
-                         file_info.get("block_id"),
-                         file_info.get("size_in_bytes"),
-                         file_info.get("copy_nb"),
-                         file_info.get("tape_file_creation_time"),
-                         file_info.get("archive_file_id")))
-                except psycopg2.IntegrityError:
-                    logger.warning(f"Tape file record aleady exists {archive_file_id} {pnfsid} {file_name}")
-                    pass
-
-            res = psycopg.insert(
+            psycopg.insert(
                 cta_db,
                 "update tape set dirty = '1' where vid = %s",
                 (file_info.get("vid"),))
 
-
-
-        res = psycopg.update(
-            chimera_db,
-            "update t_inodes set "
-            " ipnfsid = %s, "
-            " imode = %s, "
-            " iuid = %s, "
-            " igid = %s, "
-            " icrtime = %s, "
-            " ictime = %s, "
-            " iatime = %s, "
-            " imtime = %s, "
-            " iaccess_latency = %s, "
-            " iretention_policy = 0, "
-            " isize = %s "
-            "where ipnfsid = %s",
-            (pnfsid,
-             chimera_file_info.get("imode"),
-             chimera_file_info.get("iuid"),
-             chimera_file_info.get("igid"),
-             chimera_file_info.get("icrtime"),
-             chimera_file_info.get("icrtime"),
-             chimera_file_info.get("icrtime"),
-             chimera_file_info.get("icrtime"),
-             chimera_file_info.get("iaccess_latency"),
-             chimera_file_info.get("isize"),
-             new_pnfsid,))
+        update_inode(chimera_db, chimera_file_info, new_pnfsid)
 
         logger.info(f"Doing checksum {pnfsid} {adler32_csum}")
 
-        res = psycopg.insert(
-            chimera_db,
-            "update t_inodes_checksum "
-            " set isum = %s "
-            "where "
-            "inumber = (select inumber from t_inodes where ipnfsid = %s)",
-            (adler32_csum, pnfsid))
+        update_inode_checksum(chimera_db, adler32_csum, pnfsid)
 
         try:
-            res = psycopg.insert(
+            psycopg.insert(
                 chimera_db,
                 "insert into t_storageinfo ("
                 " inumber, ihsmname, istoragegroup, istoragesubgroup "
                 ") values ( "
-                "(select inumber from t_inodes where ipnfsid = %s), %s, %s, %s)",
+                "(select inumber from t_inodes where ipnfsid = %s), "
+                "%s, %s, %s)",
                 (pnfsid, hsm, vo, file_family))
-            logger.info(f"Inserted into t_storageinfo {pnfsid} {hsm} {vo} {file_family}")
-        except:
-            res = psycopg.insert(
+            logger.info(
+                "Inserted into t_storageinfo "
+                f"{pnfsid} {hsm} {vo} {file_family}")
+        except psycopg2.IntegrityError:
+            psycopg.insert(
                 chimera_db,
                 "update t_storageinfo "
                 "set ihsmname = %s, "
                 "istoragegroup = %s, "
                 "istoragesubgroup = %s "
-                "where inumber = (select inumber from t_inodes where ipnfsid = %s) ",
+                "where inumber = "
+                "(select inumber from t_inodes where ipnfsid = %s) ",
                 (hsm, vo, file_family, pnfsid))
-            logger.info(f"Updated into t_storageinfo {pnfsid} {hsm} {vo} {file_family}")
+            logger.info(
+                "Updated into t_storageinfo "
+                f"{pnfsid} {hsm} {vo} {file_family}")
 
-
-        res = psycopg.insert(
-            chimera_db,
-            "insert into t_locationinfo ("
-            " inumber, itype, ipriority, ictime, iatime, istate, ilocation "
-            ") values ("
-            "(select inumber from t_inodes where ipnfsid = %s), "
-            "0, 10, %s, %s, 1, %s)",
-            (pnfsid,
-             chimera_file_info.get("icrtime"),
-             chimera_file_info.get("icrtime"),
-             f"cta://cta/{pnfsid}?archiveid={archive_file_id}"))
-
-        logger.info(f"Inserted into t_locationinfo {pnfsid} cta://cta/{pnfsid}?archiveid={archive_file_id}")
-
-        rows = psycopg.select(
-            chimera_db,
-            "select ilocation from t_locationinfo "
-            "where inumber = (select inumber from t_inodes where ipnfsid = %s) "
-            " and itype = 1",
-            (pnfsid,))
-
-        if rows:
-            locations = [row["ilocation"] for row in rows]
-            logger.info(f"TODO: delete {new_pnfsid} on locations {locations}")
-
-        res = psycopg.insert(
-            chimera_db,
-            "delete from t_locationinfo "
-            "where inumber = (select inumber from t_inodes where ipnfsid = %s) "
-            " and itype = 1",
-            (pnfsid,))
-
-        res = psycopg.insert(
-            chimera_db,
-            "delete from t_deleted_paths "
-            "where ipnfsid = %s ",
-            (pnfsid,))
-
-        res = psycopg.insert(
-            cta_db,
-            "delete from file_recycle_log "
-            "where "
-            " archive_file_id = %s "
-            " and disk_file_id_when_deleted = %s ",
-            (archive_file_id, pnfsid))
-
-#        res = psycopg.insert(
-#            cta_db,
-#            "delete from file_recycle_log "
-#            "where "
-#            " archive_file_id = %s "
-#            " and copy_nb = %s "
-#            " and disk_file_id_when_deleted = %s ",
-#            (archive_file_id, file_info.get("copy_nb"), pnfsid))
+        update_locationinfo(
+            chimera_db, chimera_file_info, archive_file_id, new_pnfsid)
+        logger.info(
+            "Inserted into t_locationinfo "
+            f"{pnfsid} cta://cta/{pnfsid}?archiveid={archive_file_id}")
+        delete_from_deleted_paths(chimera_db, pnfsid)
+        delete_from_file_recycle_log(cta_db, archive_file_id, pnfsid)
 
 
 def main() -> None:
@@ -360,10 +471,9 @@ def main() -> None:
     parser.add_argument(
         "-p", "--path",
         nargs='+',
-        help='File paths to be recover, space separted',
+        help='File paths to be recover, space separated',
         required=False,
         metavar="PATH")
-
 
     parser.add_argument(
         "-f", "--file",
@@ -372,7 +482,6 @@ def main() -> None:
         metavar="FILE",
         help="File with list of full path names to recover, one path per line",
     )
-
 
     args = parser.parse_args()
 
@@ -411,15 +520,6 @@ def main() -> None:
 
     logger.info("Starting recovery processing")
 
-    queue: Queue = Queue(maxsize=10)
-    workers = [
-        Worker(queue, config)
-        for _ in range(args.cpu_count)
-    ]
-
-    for worker in workers:
-        worker.start()
-
     # Process files
     files = set()
     if args.path:
@@ -433,31 +533,21 @@ def main() -> None:
                     continue
                 files.add(file_path)
 
-
     logger.info(f"Collected {len(files)} files for processing")
+
+    queue: Queue = Queue(maxsize=10)
+    workers = [
+        Worker(queue, config)
+        for _ in range(args.cpu_count)
+    ]
+
+    for worker in workers:
+        worker.start()
 
     for i, item in enumerate(files, 1):
         if i % 100 == 0:
             logger.info(f"Queued {i} files for processing")
         queue.put(item)
-
-
-#    if args.path:
-#        for i, item in enumerate(args.path, 1):
-#            if i % 100 == 0:
-#                logger.info(f"Queued {i} files for processing")
-#            queue.put(item)
-#
-#    if args.file:
-#        with open(args.file, "r") as f:
-#            i = total
-#            for line in f:
-#                i += 1
-#                if i % 100 == 0:
-#                    logger.info(f"Queued {i} files for processing")
-#            item = line.strip()
-#            queue.put(item)
-#
 
     # Signal workers to finish
     for _ in range(args.cpu_count):
