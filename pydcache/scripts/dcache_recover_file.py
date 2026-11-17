@@ -11,16 +11,18 @@ import argparse
 import logging
 import multiprocessing
 import os
-import sys
-import traceback
-from multiprocessing import Process, Queue
-from pathlib import Path
-from typing import Any, Dict
-
 import psycopg2
 import psycopg2.extensions
 import psycopg2.extras
+import socket
+import sys
+import traceback
 import yaml
+
+from datetime import datetime
+from multiprocessing import Process, Queue
+from pathlib import Path
+from typing import Any, Dict
 
 from pydcache.util import admin, kerberos, ostools, psycopg
 from pydcache.config import get_config_path
@@ -32,6 +34,43 @@ logging.basicConfig(
     stream=sys.stderr
 )
 logger = logging.getLogger(__name__)
+
+
+HOSTNAME = socket.getfqdn()
+CRC_SWITCH = '2019-08-21 09:54:26-05:00'
+
+
+def get_switch_epoch() -> int:
+    """Timestamp when the change from 0 to 1 based adler checksum happened
+
+    Returns:
+        Seconds since the Unix epoch
+    """
+    return int(datetime.fromisoformat(CRC_SWITCH).timestamp())
+
+
+def convert_0_adler32_to_1_adler32(crc: int, filesize: int) -> int:
+    """Convert an adler32 checksum seeded with 0 to the standard seed of 1
+
+    Standard adler32 starts its low sum at 1. Starting at 1 instead of 0
+    adds 1 to the low 16 bits and, as the low sum is accumulated once per
+    byte, the file size to the high 16 bits, both modulo 65521.
+
+    Args:
+        crc: adler32 checksum computed with seed 0
+        filesize: file size in bytes
+
+    Returns:
+        adler32 checksum of the same data computed with seed 1
+    """
+    BASE = 65521
+    size = filesize % BASE
+    s1 = (crc & 0xffff)
+    s2 = ((crc >> 16) & 0xffff)
+    s1 = (s1 + 1) % BASE
+    s2 = (size + s2) % BASE
+    new_adler = (s2 << 16) + s1
+    return new_adler
 
 
 def insert_archive_file(
@@ -179,7 +218,7 @@ def update_inode_checksum(
         "insert into t_inodes_checksum (inumber, itype, isum) "
         "values ("
         "(select inumber from t_inodes where ipnfsid = %s), 1, %s) "
-        "on conflict on constraint t_inodes_checksum_pkey "
+        "on conflict (inumber, itype) "
         "do update set isum = excluded.isum",
         (pnfsid, adler32_csum))
 
@@ -301,6 +340,10 @@ class Worker(Process):
         try:
             cta_db = psycopg.create_connection(self.config["cta_db"])
             chimera_db = psycopg.create_connection(self.config["chimera_db"])
+            enstore_db = None
+            if "enstore_db" in self.config:
+                enstore_db = psycopg.create_connection(
+                    self.config["enstore_db"])
             for file_name in iter(self.queue.get, None):
                 try:
                     self._process_file(file_name, cta_db, chimera_db)
@@ -316,7 +359,7 @@ class Worker(Process):
             error_trace = traceback.format_exc()
             logger.error(error_trace)
         finally:
-            for conn in (cta_db, chimera_db):
+            for conn in (cta_db, chimera_db, enstore_db):
                 if conn:
                     try:
                         conn.close()
