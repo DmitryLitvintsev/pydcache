@@ -11,21 +11,22 @@ import argparse
 import logging
 import multiprocessing
 import os
-import psycopg2
-import psycopg2.extensions
-import psycopg2.extras
 import socket
 import sys
 import traceback
-import yaml
-
 from datetime import datetime
 from multiprocessing import Process, Queue
 from pathlib import Path
-from typing import Any, Dict
+from queue import Full
+from typing import Any, Dict, List, Optional
 
-from pydcache.util import admin, kerberos, ostools, psycopg
+import psycopg2
+import psycopg2.extensions
+import psycopg2.extras
+import yaml
+
 from pydcache.config import get_config_path
+from pydcache.util import ostools, psycopg
 
 # Configure logging
 logging.basicConfig(
@@ -38,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 HOSTNAME = socket.getfqdn()
 CRC_SWITCH = '2019-08-21 09:54:26-05:00'
+# seconds to wait on a full queue before checking that workers are alive
+QUEUE_PUT_TIMEOUT = 5
 
 
 def get_switch_epoch() -> int:
@@ -108,7 +111,10 @@ def insert_archive_file(
         "%s, "
         "%s, "
         "%s, "
-        "%s) ",
+        "%s) "
+        # already restored by a previous (interrupted) run; a different
+        # archive file claiming this disk file id must still fail
+        "on conflict (archive_file_id) do nothing",
         (file_info.get("archive_file_id"),
          file_info.get("disk_instance_name"),
          file_info.get("disk_file_id_when_deleted"),
@@ -223,18 +229,70 @@ def update_inode_checksum(
         (pnfsid, adler32_csum))
 
 
+def upsert_storageinfo(
+    chimera_db: psycopg2.extensions.connection,
+    pnfsid: str,
+    hsm: str,
+    storage_group: str,
+    storage_subgroup: str
+) -> None:
+    """Set inode storage info, replacing an existing one
+
+    Args:
+        chimera_db: Chimera database connection
+        pnfsid: pnfsid of deleted file
+        hsm: HSM name
+        storage_group: storage group (VO)
+        storage_subgroup: storage subgroup (file family)
+    """
+    psycopg.insert(
+        chimera_db,
+        "insert into t_storageinfo ("
+        " inumber, ihsmname, istoragegroup, istoragesubgroup "
+        ") values ("
+        "(select inumber from t_inodes where ipnfsid = %s), %s, %s, %s) "
+        "on conflict (inumber) "
+        "do update set ihsmname = excluded.ihsmname, "
+        " istoragegroup = excluded.istoragegroup, "
+        " istoragesubgroup = excluded.istoragesubgroup",
+        (pnfsid, hsm, storage_group, storage_subgroup))
+    logger.info(
+        "Set t_storageinfo "
+        f"{pnfsid} {hsm} {storage_group} {storage_subgroup}")
+
+
+def inode_exists(
+    chimera_db: psycopg2.extensions.connection,
+    pnfsid: str
+) -> bool:
+    """Check whether an inode exists in the namespace
+
+    Args:
+        chimera_db: Chimera database connection
+        pnfsid: pnfsid to check
+
+    Returns:
+        True if an inode with this pnfsid exists
+    """
+    rows = psycopg.select(
+        chimera_db,
+        "select 1 from t_inodes where ipnfsid = %s",
+        (pnfsid,))
+    return bool(rows)
+
+
 def update_locationinfo(
     chimera_db: psycopg2.extensions.connection,
     chimera_file_info: Dict[str, Any],
-    archive_file_id: int,
+    location: str,
     pnfsid_new: str
 ) -> None:
-    """Update locationinfo w/ archive_file_id
+    """Update locationinfo for pnfsid
 
     Args:
         chimera_db: Chimera database connection
         chimera_file_info: dictionary containing original file info
-        archive_file_id: archive file id
+        location: location string
         pnfsid_new: placeholder file pnfsid
     """
 
@@ -250,7 +308,7 @@ def update_locationinfo(
         (chimera_file_info.get("ipnfsid"),
          chimera_file_info.get("icrtime"),
          chimera_file_info.get("icrtime"),
-         f"cta://cta/{pnfsid}?archiveid={archive_file_id}"))
+         location))
 
     rows = psycopg.select(
         chimera_db,
@@ -336,28 +394,31 @@ class Worker(Process):
 
     def run(self) -> None:
         """Process tasks from the queue."""
-        cta_db = chimera_db = None
+        cta_db = chimera_db = enstore_db = None
+        exit_code = 0
         try:
             cta_db = psycopg.create_connection(self.config["cta_db"])
             chimera_db = psycopg.create_connection(self.config["chimera_db"])
-            enstore_db = None
             if "enstore_db" in self.config:
                 enstore_db = psycopg.create_connection(
                     self.config["enstore_db"])
             for file_name in iter(self.queue.get, None):
                 try:
-                    self._process_file(file_name, cta_db, chimera_db)
+                    self._process_file(file_name, cta_db,
+                                       chimera_db, enstore_db)
                 except Exception as e:
                     logger.error(f"Error processing {file_name} {e}")
                     error_trace = traceback.format_exc()
                     logger.error(error_trace)
                     # a failed statement leaves the transaction aborted
-                    for conn in (cta_db, chimera_db):
-                        conn.rollback()
+                    for conn in (cta_db, chimera_db, enstore_db):
+                        if conn:
+                            conn.rollback()
         except Exception as exc:
             logger.error(f"Worker failed: {exc}")
             error_trace = traceback.format_exc()
             logger.error(error_trace)
+            exit_code = 1
         finally:
             for conn in (cta_db, chimera_db, enstore_db):
                 if conn:
@@ -365,12 +426,16 @@ class Worker(Process):
                         conn.close()
                     except Exception:
                         pass
+        if exit_code:
+            # let the main process see the failure in exitcode
+            sys.exit(exit_code)
 
     def _process_file(
         self,
         file_name: str,
         cta_db: psycopg2.extensions.connection,
-        chimera_db: psycopg2.extensions.connection
+        chimera_db: psycopg2.extensions.connection,
+        enstore_db: Optional[psycopg2.extensions.connection]
     ) -> None:
         """Process a single file.
 
@@ -378,6 +443,8 @@ class Worker(Process):
             file_name: full file name
             cta_db: CTA database connection
             chimera_db: Chimera database connection
+            enstore_db: Enstore database connection, None if not
+                        configured (SFA files cannot be recovered)
         """
 
         dir_name = os.path.dirname(file_name)
@@ -417,22 +484,68 @@ class Worker(Process):
         )
 
         if not rows:
-            logger.error(
-                f"{file_name} {pnfsid} does not exist in CTA DB, skipping")
+            if not enstore_db:
+                logger.error(
+                    f"{file_name} {pnfsid} does not exist in CTA DB, "
+                    "skipping")
+                return
+            enstore_rows = psycopg.select(
+                enstore_db,
+                "select f.bfid, f.package_id, "
+                "       f.pnfs_id as child_pnfsid, "
+                "       p.pnfs_id as parent_pnfsid, "
+                "       f.crc, f.size, v.storage_group, "
+                "       v.file_family from file f "
+                "inner join file p on f.package_id = p.bfid "
+                "inner join volume v on v.id = f.volume "
+                "where f.package_id != f.bfid and f.deleted = 'n' "
+                "and f.package_id is not null and f.pnfs_id = %s "
+                "and p.deleted = 'n'",
+                (pnfsid, ))
+            if not enstore_rows:
+                logger.error(
+                    f"{file_name} {pnfsid} does not exist in CTA DB and is "
+                    "not an SFA file in Enstore DB, skipping")
+                return
+            if len(enstore_rows) > 1:
+                logger.error(
+                    f"{file_name} {pnfsid} has multiple SFA records in "
+                    "Enstore DB, skipping")
+                return
+            self._process_sfa_file(
+                file_name, chimera_db, chimera_file_info, enstore_rows[0])
             return
 
-        # placeholder file to be populated from deleted file metadata
-        Path(file_name).touch()
-        new_pnfsid = ostools.get_pnfsid(file_name)
-
-        inserted_archive = False
-        adler32_csum = hex(
-            int(rows[0].get("checksum_adler32"))).lstrip("0x").zfill(8)
+        archive_file_id = rows[0].get("archive_file_id")
+        adler32_csum = f"{int(rows[0].get('checksum_adler32')):08x}"
         storage_class = rows[0].get("storage_class_name")
         parts = storage_class.split("@")
         (vo, file_family), hsm = parts[0].split("."), parts[1]
-        archive_file_id = rows[0].get("archive_file_id")
+        location = f"cta://cta/{pnfsid}?archiveid={archive_file_id}"
 
+        # placeholder file to be populated from deleted file metadata;
+        # created only once all metadata has been validated
+        Path(file_name).touch()
+        new_pnfsid = ostools.get_pnfsid(file_name)
+
+        update_inode(chimera_db, chimera_file_info, new_pnfsid)
+
+        logger.info(f"Doing checksum {pnfsid} {adler32_csum}")
+
+        update_inode_checksum(chimera_db, adler32_csum, pnfsid)
+
+        upsert_storageinfo(chimera_db, pnfsid, hsm, vo, file_family)
+
+        update_locationinfo(
+            chimera_db, chimera_file_info, location, new_pnfsid)
+        logger.info(f"Inserted into t_locationinfo {pnfsid} {location}")
+
+        # CTA is modified last, so that a failure in Chimera leaves CTA
+        # untouched and only one database needs to be fixed by hand
+        # TODO: make the Chimera and CTA updates transactional; each
+        # statement currently commits on its own, so losing a connection
+        # between statements leaves a partially recovered file
+        inserted_archive = False
         for file_info in rows:
             if not inserted_archive:
                 insert_archive_file(cta_db, file_info)
@@ -443,12 +556,77 @@ class Worker(Process):
                 logger.warning(
                     "Tape file record already exists "
                     f"{archive_file_id} {pnfsid} {file_name}")
-                pass
 
             psycopg.insert(
                 cta_db,
                 "update tape set dirty = '1' where vid = %s",
                 (file_info.get("vid"),))
+
+        delete_from_file_recycle_log(cta_db, archive_file_id, pnfsid)
+        delete_from_deleted_paths(chimera_db, pnfsid)
+
+    def _process_sfa_file(
+        self,
+        file_name: str,
+        chimera_db: psycopg2.extensions.connection,
+        chimera_file_info: Dict[str, Any],
+        enstore_file_info: Dict[str, Any]
+    ) -> None:
+        """Process a single SFA file.
+
+        Args:
+            file_name: full file name
+            chimera_db: Chimera database connection
+            chimera_file_info: dictionary containing
+                               chimera info about file from
+                               t_deleted_paths
+            enstore_file_info: dictionary containing
+                               enstore info about file
+        """
+        logger.debug(f"{chimera_file_info} {enstore_file_info}")
+
+        pnfsid = enstore_file_info["child_pnfsid"]
+        parent_pnfsid = enstore_file_info["parent_pnfsid"]
+
+        # without its package the recovered file could never be read
+        if not inode_exists(chimera_db, parent_pnfsid):
+            logger.error(
+                f"{file_name} {pnfsid} SFA package {parent_pnfsid} "
+                "does not exist in chimera, skipping")
+            return
+
+        file_crc = enstore_file_info["crc"]
+        file_size = enstore_file_info["size"]
+        if file_crc is None or file_size is None:
+            logger.error(
+                f"{file_name} {pnfsid} has no checksum or size in "
+                "Enstore DB, skipping")
+            return
+
+        file_create_time = int(enstore_file_info["bfid"][4:14])
+        if (file_create_time < get_switch_epoch()
+                and HOSTNAME.endswith(".fnal.gov")):
+            file_crc = convert_0_adler32_to_1_adler32(file_crc, file_size)
+            logger.debug(
+                "Caught 0 seeded adler32 "
+                f"{file_name} {pnfsid} {file_crc}")
+
+        adler32_csum = f"{file_crc:08x}"
+        vo = enstore_file_info["storage_group"]
+        file_family = enstore_file_info["file_family"]
+        if file_family.endswith("-MIGRATION"):
+            file_family = file_family[:-len("-MIGRATION")]
+        hsm = "cta"
+        location = f"sfa://sfa/{pnfsid}?packageid={parent_pnfsid}"
+
+        logger.debug(
+            f"creation time {file_create_time} {location} "
+            f"{adler32_csum} {vo} {file_family} {hsm}")
+
+        # placeholder file to be populated from deleted file metadata;
+        # created only once all metadata has been validated
+        Path(file_name).touch()
+        new_pnfsid = ostools.get_pnfsid(file_name)
 
         update_inode(chimera_db, chimera_file_info, new_pnfsid)
 
@@ -456,43 +634,43 @@ class Worker(Process):
 
         update_inode_checksum(chimera_db, adler32_csum, pnfsid)
 
-        try:
-            psycopg.insert(
-                chimera_db,
-                "insert into t_storageinfo ("
-                " inumber, ihsmname, istoragegroup, istoragesubgroup "
-                ") values ( "
-                "(select inumber from t_inodes where ipnfsid = %s), "
-                "%s, %s, %s)",
-                (pnfsid, hsm, vo, file_family))
-            logger.info(
-                "Inserted into t_storageinfo "
-                f"{pnfsid} {hsm} {vo} {file_family}")
-        except psycopg2.IntegrityError:
-            psycopg.insert(
-                chimera_db,
-                "update t_storageinfo "
-                "set ihsmname = %s, "
-                "istoragegroup = %s, "
-                "istoragesubgroup = %s "
-                "where inumber = "
-                "(select inumber from t_inodes where ipnfsid = %s) ",
-                (hsm, vo, file_family, pnfsid))
-            logger.info(
-                "Updated into t_storageinfo "
-                f"{pnfsid} {hsm} {vo} {file_family}")
+        upsert_storageinfo(chimera_db, pnfsid, hsm, vo, file_family)
 
         update_locationinfo(
-            chimera_db, chimera_file_info, archive_file_id, new_pnfsid)
-        logger.info(
-            "Inserted into t_locationinfo "
-            f"{pnfsid} cta://cta/{pnfsid}?archiveid={archive_file_id}")
+            chimera_db, chimera_file_info, location, new_pnfsid)
+        logger.info(f"Inserted into t_locationinfo {pnfsid} {location}")
         delete_from_deleted_paths(chimera_db, pnfsid)
-        delete_from_file_recycle_log(cta_db, archive_file_id, pnfsid)
+
+
+def put_while_workers_alive(
+    queue: Queue,
+    item: Any,
+    workers: List[Process]
+) -> bool:
+    """Put item on the queue unless all workers have exited
+
+    A worker exits if, e.g., it cannot connect to a database; blocking
+    on a full queue with no worker left to consume it would hang forever.
+
+    Args:
+        queue: Task queue
+        item: item to put
+        workers: worker processes consuming the queue
+
+    Returns:
+        True if the item was queued, False if no worker is alive
+    """
+    while True:
+        try:
+            queue.put(item, timeout=QUEUE_PUT_TIMEOUT)
+            return True
+        except Full:
+            if not any(worker.is_alive() for worker in workers):
+                return False
 
 
 def main() -> None:
-    """Main function to process files that are already on tape."""
+    """Main function to recover deleted files."""
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description="Recover removed files"
@@ -506,7 +684,7 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--verbose",
+        "-v", "--verbose",
         action="store_true",
         help="Enable verbose logging"
     )
@@ -514,7 +692,7 @@ def main() -> None:
     parser.add_argument(
         "-p", "--path",
         nargs='+',
-        help='File paths to be recover, space separated',
+        help='File paths to recover, space separated',
         required=False,
         metavar="PATH")
 
@@ -535,6 +713,9 @@ def main() -> None:
         parser.print_help(sys.stderr)
         sys.exit(1)
 
+    if args.cpu_count < 1:
+        parser.error("--cpu-count must be at least 1")
+
     # Load configuration
     config = {}
     try:
@@ -553,7 +734,7 @@ def main() -> None:
 
     except (OSError, IOError) as exc:
         if isinstance(exc, FileNotFoundError):
-            logger.error("Config file %s does not exist", exc)
+            logger.error("Config file %s does not exist", exc.filename)
         else:
             logger.error("Error reading config file: %s", exc)
         sys.exit(1)
@@ -576,29 +757,54 @@ def main() -> None:
                     continue
                 files.add(file_path)
 
+    if not files:
+        logger.info("Nothing to do")
+        return
+
     logger.info(f"Collected {len(files)} files for processing")
 
-    queue: Queue = Queue(maxsize=10)
+    # no point in more workers (and database connections) than files
+    num_workers = min(args.cpu_count, len(files))
+
+    queue: Queue = Queue(maxsize=1000)
     workers = [
         Worker(queue, config)
-        for _ in range(args.cpu_count)
+        for _ in range(num_workers)
     ]
 
     for worker in workers:
         worker.start()
 
+    aborted = False
     for i, item in enumerate(files, 1):
         if i % 100 == 0:
             logger.info(f"Queued {i} files for processing")
-        queue.put(item)
+        if not put_while_workers_alive(queue, item, workers):
+            logger.error(
+                f"All workers exited, {len(files) - i + 1} files "
+                "were not queued for processing")
+            aborted = True
+            break
 
     # Signal workers to finish
-    for _ in range(args.cpu_count):
-        queue.put(None)
+    if not aborted:
+        for _ in range(num_workers):
+            if not put_while_workers_alive(queue, None, workers):
+                break
 
     # Wait for workers
     for worker in workers:
         worker.join()
+
+    failed = sum(1 for worker in workers if worker.exitcode != 0)
+    if failed:
+        logger.error(f"{failed} of {num_workers} workers failed")
+
+    if aborted or failed:
+        # items left in the queue would otherwise block the exit of
+        # this process, waiting for them to be consumed
+        queue.cancel_join_thread()
+        sys.exit(1)
 
     logger.info("Processing completed successfully")
 
