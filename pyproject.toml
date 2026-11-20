@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydcache"
-version = "0.1.26"
+# version is read from pydcache/__init__.py (see [tool.setuptools.dynamic])
+dynamic = ["version"]
 description = "Collection of dCache Python utilities"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -41,12 +42,13 @@ dev = [
     "build>=1.0",
     "twine>=5.0",
     "pytest>=7.0",
+    "bump-my-version>=1.0",
 ]
 
 [project.scripts]
 cta-nanny = "pydcache.scripts.cta_nanny:main"
 dcache-kill-restores = "pydcache.scripts.dcache_kill_restores:main"
-dcache-tape-api = "pydcache.scripts.dcache_kill_restores:main"
+dcache-tape-api = "pydcache.scripts.dcache_tape_api:main"
 dcache-ferry = "pydcache.scripts.dcache_ferry:main"
 dcache-recover-file = "pydcache.scripts.dcache_recover_file:main"
 
@@ -58,9 +60,25 @@ Issues = "https://github.com/DmitryLitvintsev/pydcache/issues"
 where = ["."]
 include = ["pydcache*"]
 
+[tool.setuptools.dynamic]
+version = { attr = "pydcache.__version__" }
+
 [tool.setuptools.package-data]
 "pydcache" = ["py.typed"]
 "pydcache.config" = ["*.yaml", "*.service"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Release: "bump-my-version bump patch|minor|major" updates the version,
+# commits and tags; pushing the tag publishes to PyPI (see RELEASING.md).
+[tool.bumpversion]
+current_version = "0.1.26"
+commit = true
+tag = true
+tag_name = "{new_version}"
+tag_message = "pydcache {new_version}"
+message = "release {new_version}"
+
+[[tool.bumpversion.files]]
+filename = "pydcache/__init__.py"
