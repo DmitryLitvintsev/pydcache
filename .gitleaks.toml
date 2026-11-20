@@ -1,0 +1,26 @@
+# gitleaks configuration: default rules plus project allowlist.
+#
+# Handling false positives, narrowest first:
+#   - append "# gitleaks:allow" to the offending line
+#   - add the finding's fingerprint (printed by gitleaks) to .gitleaksignore
+#   - skip the check for one commit: SKIP=gitleaks git commit ...
+#     (or "git commit --no-verify" to skip all hooks)
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Placeholder credentials in example and template files"
+regexes = [
+    '''(?i)changeme''',
+    '''^<[^<>]+>$''',  # documentation placeholders: <password>
+]
+
+# Not covered by the default rules: password in a database URI,
+# e.g. postgresql://user:secret@host/db (the format used in our configs)
+[[rules]]
+id = "db-uri-password"
+description = "Password in a database connection URI"
+regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqp|oracle)://[^:@/\s]+:([^@\s]+)@'''
+secretGroup = 1
+keywords = ["postgres", "mysql", "mariadb", "mongodb", "redis", "amqp", "oracle"]

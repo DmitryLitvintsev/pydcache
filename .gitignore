@@ -60,3 +60,7 @@ scripts/cta_nanny.yaml
 scripts/cta_nanny_cms.yaml
 scripts/*.yaml
 
+
+# Local credential files
+token.txt
+*.token
